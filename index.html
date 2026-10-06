@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="OverlayCam">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>OverlayCam</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+    font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; user-select: none; -webkit-user-select: none; }
+  #stage { position: fixed; inset: 0; overflow: hidden; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #overlay { position: absolute; left: 50%; top: 50%; width: 80vw; max-width: none; pointer-events: none;
+    transform-origin: center; display: none; }
+  #gesture { position: absolute; inset: 0; touch-action: none; }
+
+  .bar { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 10px; padding: 10px 14px; }
+  #top { top: 0; padding-top: max(10px, env(safe-area-inset-top)); background: linear-gradient(#000a, #0000); }
+  #bottom { bottom: 0; justify-content: space-around; padding-bottom: max(18px, env(safe-area-inset-bottom));
+    background: linear-gradient(#0000, #000a); }
+  button, .btn { background: #fff2; color: #fff; border: 0; border-radius: 10px; padding: 9px 12px; font: inherit;
+    cursor: pointer; white-space: nowrap; }
+  button.on { background: #ffd400; color: #000; }
+  button:disabled { opacity: .35; }
+  #opacity { flex: 1; min-width: 60px; accent-color: #ffd400; }
+  #shutter { width: 74px; height: 74px; border-radius: 50%; padding: 0; background: #fff;
+    border: 5px solid #fff; box-shadow: inset 0 0 0 3px #000; }
+  #shutter:active { transform: scale(.94); }
+  .side { width: 64px; text-align: center; }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+
+  #msg { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px;
+    text-align: center; background: #000; line-height: 1.5; }
+  #review { position: fixed; inset: 0; display: none; flex-direction: column; background: #000; }
+  #review img { flex: 1; min-height: 0; width: 100%; object-fit: contain; -webkit-touch-callout: default; user-select: auto; }
+  #review .hint { text-align: center; font-size: 13px; opacity: .6; padding: 6px 16px 0; }
+  #review .bar { position: static; justify-content: center; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  #review button { padding: 12px 20px; }
+  #save { background: #ffd400; color: #000; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <img id="overlay" alt="">
+  <div id="gesture"></div>
+
+  <div id="top" class="bar">
+    <label class="btn" for="file">Bild</label>
+    <input id="file" type="file" accept="image/*" hidden>
+    <input id="opacity" type="range" min="0" max="1" step="0.01" value="0.5" disabled>
+    <button id="lock" disabled>Fixieren</button>
+    <button id="reset" disabled>Reset</button>
+  </div>
+
+  <div id="bottom" class="bar">
+    <button id="toggle" class="side" disabled>Overlay</button>
+    <button id="shutter" aria-label="Foto aufnehmen"></button>
+    <button id="flip" class="side">Kamera</button>
+  </div>
+</div>
+<div id="flash"></div>
+<div id="msg"></div>
+
+<div id="review">
+  <img id="photo" alt="Aufnahme">
+  <div class="hint">Tipp: Lange aufs Bild drücken → „Zu Fotos hinzufügen“</div>
+  <div class="bar">
+    <button id="back">Verwerfen</button>
+    <button id="save">Sichern / Teilen</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), overlay = $('overlay'), gesture = $('gesture');
+
+// ---------- Kamera ----------
+let stream = null, facing = 'environment';
+
+async function startCamera() {
+  stopCamera();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: facing, width: { ideal: 4032 }, height: { ideal: 3024 } }
+    });
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    $('msg').style.display = 'none';
+  } catch (e) {
+    showMsg(location.protocol !== 'https:' && location.hostname !== 'localhost'
+      ? 'Kamera braucht HTTPS. Bitte die Seite über https:// öffnen.'
+      : 'Kein Kamerazugriff (' + e.name + ').<br>In den Einstellungen → Safari → Kamera erlauben und neu laden.');
+  }
+}
+function stopCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+}
+function showMsg(html) { $('msg').innerHTML = html; $('msg').style.display = 'flex'; }
+
+$('flip').onclick = () => { facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); };
+
+// iOS friert den Stream nach Hintergrund gerne ein -> neu starten
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopCamera();
+  else if ($('review').style.display !== 'flex') startCamera();
+});
+
+// ---------- Overlay ----------
+let t = { x: 0, y: 0, s: 1, r: 0 }, locked = false, visible = true;
+
+function applyTransform() {
+  overlay.style.transform =
+    `translate(-50%,-50%) translate(${t.x}px,${t.y}px) rotate(${t.r}rad) scale(${t.s})`;
+}
+function resetTransform() { t = { x: 0, y: 0, s: 1, r: 0 }; applyTransform(); }
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (overlay.src.startsWith('blob:')) URL.revokeObjectURL(overlay.src);
+  overlay.src = URL.createObjectURL(f);
+  overlay.style.display = 'block';
+  visible = true; locked = false;
+  $('toggle').classList.add('on'); $('lock').classList.remove('on');
+  ['opacity', 'lock', 'reset', 'toggle'].forEach(id => $(id).disabled = false);
+  overlay.style.opacity = $('opacity').value;
+  resetTransform();
+  e.target.value = '';
+};
+$('opacity').oninput = e => overlay.style.opacity = e.target.value;
+$('reset').onclick = resetTransform;
+$('lock').onclick = () => { locked = !locked; $('lock').classList.toggle('on', locked); };
+$('toggle').onclick = () => {
+  visible = !visible;
+  overlay.style.display = visible ? 'block' : 'none';
+  $('toggle').classList.toggle('on', visible);
+};
+
+// Gesten: 1 Finger verschieben, 2 Finger zoomen + drehen
+const pts = new Map();
+const pair = () => {
+  const [a, b] = [...pts.values()];
+  return { d: Math.hypot(b.x - a.x, b.y - a.y), a: Math.atan2(b.y - a.y, b.x - a.x),
+           mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+};
+gesture.addEventListener('pointerdown', e => {
+  gesture.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+});
+gesture.addEventListener('pointermove', e => {
+  if (!pts.has(e.pointerId) || locked || !overlay.src) return;
+  const prev = pts.get(e.pointerId);
+  if (pts.size === 1) {
+    t.x += e.clientX - prev.x; t.y += e.clientY - prev.y;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  } else if (pts.size === 2) {
+    const before = pair();
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const after = pair();
+    if (before.d > 0) t.s = Math.min(20, Math.max(0.05, t.s * after.d / before.d));
+    t.r += after.a - before.a;
+    t.x += after.mx - before.mx; t.y += after.my - before.my;
+  } else {
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  }
+  applyTransform();
+});
+['pointerup', 'pointercancel'].forEach(ev => gesture.addEventListener(ev, e => pts.delete(e.pointerId)));
+// Desktop-Test: Mausrad = zoomen
+gesture.addEventListener('wheel', e => {
+  if (locked || !overlay.src) return;
+  e.preventDefault();
+  t.s = Math.min(20, Math.max(0.05, t.s * Math.exp(-e.deltaY / 500)));
+  applyTransform();
+}, { passive: false });
+
+// ---------- Aufnahme (nur Kamerabild, Ausschnitt = was man sieht) ----------
+let photoFile = null;
+
+$('shutter').onclick = () => {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+  // object-fit: cover nachbilden -> sichtbaren Bereich aus dem Videoframe ausschneiden
+  const W = video.clientWidth, H = video.clientHeight;
+  const k = Math.max(W / vw, H / vh);
+  const sw = Math.round(W / k), sh = Math.round(H / k);
+  const sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
+
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  c.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  $('flash').style.transition = 'none'; $('flash').style.opacity = 1;
+  requestAnimationFrame(() => { $('flash').style.transition = 'opacity .25s'; $('flash').style.opacity = 0; });
+
+  c.toBlob(blob => {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const name = `OverlayCam_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+    photoFile = new File([blob], name, { type: 'image/jpeg' });
+    const img = $('photo');
+    if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(blob);
+    $('review').style.display = 'flex';
+  }, 'image/jpeg', 0.92);
+};
+
+$('back').onclick = () => { $('review').style.display = 'none'; };
+$('save').onclick = async () => {
+  if (!photoFile) return;
+  if (navigator.canShare && navigator.canShare({ files: [photoFile] })) {
+    try { await navigator.share({ files: [photoFile] }); } catch (e) { /* abgebrochen */ }
+  } else {
+    const a = document.createElement('a');
+    a.href = $('photo').src; a.download = photoFile.name; a.click();
+  }
+};
+
+if (!navigator.mediaDevices?.getUserMedia) {
+  showMsg('Kamera-API nicht verfügbar. Seite muss über https:// geöffnet werden.');
+} else {
+  startCamera();
+}
+</script>
+</body>
+</html>
