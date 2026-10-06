@@ -30,6 +30,10 @@
   button.on { background: #ffd400; color: #000; }
   button:disabled { opacity: .35; }
   #opacity { flex: 1; min-width: 60px; accent-color: #ffd400; }
+  #zoombar { position: absolute; left: 0; right: 0; bottom: calc(max(18px, env(safe-area-inset-bottom)) + 92px);
+    display: flex; align-items: center; gap: 10px; padding: 0 24px; }
+  #zoom { flex: 1; accent-color: #fff; }
+  #zoomval { width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
   #shutter { width: 74px; height: 74px; border-radius: 50%; padding: 0; background: #fff;
     border: 5px solid #fff; box-shadow: inset 0 0 0 3px #000; }
   #shutter:active { transform: scale(.94); }
@@ -58,6 +62,11 @@
     <input id="opacity" type="range" min="0" max="1" step="0.01" value="0.5" disabled>
     <button id="lock" disabled>Fixieren</button>
     <button id="reset" disabled>Reset</button>
+  </div>
+
+  <div id="zoombar">
+    <input id="zoom" type="range" min="1" max="5" step="0.01" value="1">
+    <span id="zoomval">1.0×</span>
   </div>
 
   <div id="bottom" class="bar">
@@ -95,6 +104,7 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play().catch(() => {});
     $('msg').style.display = 'none';
+    setupZoom();
   } catch (e) {
     showMsg(location.protocol !== 'https:' && location.hostname !== 'localhost'
       ? 'Kamera braucht HTTPS. Bitte die Seite über https:// öffnen.'
@@ -105,6 +115,45 @@ function stopCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = null;
 }
+
+// ---------- Kamera-Zoom ----------
+// Echter Zoom über die Kamera, falls der Browser ihn anbietet, sonst digital (Ausschnitt vergrößern).
+let zoom = 1, hwZoom = false, zoomBusy = false, zoomPending = null;
+
+function setupZoom() {
+  const track = stream && stream.getVideoTracks()[0];
+  const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+  hwZoom = !!(caps.zoom && caps.zoom.max > caps.zoom.min);
+  const min = hwZoom ? caps.zoom.min : 1;
+  const max = hwZoom ? Math.min(caps.zoom.max, 10) : 5;
+  $('zoom').min = min; $('zoom').max = max;
+  setZoom(zoom); // Zoom nach Neustart (App-Wechsel, Kamera drehen) beibehalten
+}
+
+function setZoom(z) {
+  z = Math.min(+$('zoom').max, Math.max(+$('zoom').min, z));
+  zoom = z;
+  $('zoom').value = z;
+  $('zoomval').textContent = z.toFixed(1) + '×';
+  if (hwZoom) {
+    video.style.transform = '';
+    applyHwZoom(z);
+  } else {
+    video.style.transform = z > 1 ? `scale(${z})` : '';
+  }
+}
+
+// applyConstraints nicht stapeln: immer nur den letzten Wert nachschieben
+async function applyHwZoom(z) {
+  if (zoomBusy) { zoomPending = z; return; }
+  zoomBusy = true;
+  try { await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom: z }] }); } catch (e) {}
+  zoomBusy = false;
+  if (zoomPending !== null) { const p = zoomPending; zoomPending = null; applyHwZoom(p); }
+}
+
+$('zoom').oninput = e => setZoom(+e.target.value);
+
 function showMsg(html) { $('msg').innerHTML = html; $('msg').style.display = 'flex'; }
 
 $('flip').onclick = () => { facing = facing === 'environment' ? 'user' : 'environment'; startCamera(); };
@@ -158,7 +207,19 @@ gesture.addEventListener('pointerdown', e => {
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
 });
 gesture.addEventListener('pointermove', e => {
-  if (!pts.has(e.pointerId) || locked || !overlay.src) return;
+  if (!pts.has(e.pointerId)) return;
+  // Overlay fixiert oder keins geladen -> 2 Finger zoomen die Kamera
+  if (locked || !overlay.src || !visible) {
+    if (pts.size === 2) {
+      const before = pair();
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const after = pair();
+      if (before.d > 0) setZoom(zoom * after.d / before.d);
+    } else {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    return;
+  }
   const prev = pts.get(e.pointerId);
   if (pts.size === 1) {
     t.x += e.clientX - prev.x; t.y += e.clientY - prev.y;
@@ -178,8 +239,8 @@ gesture.addEventListener('pointermove', e => {
 ['pointerup', 'pointercancel'].forEach(ev => gesture.addEventListener(ev, e => pts.delete(e.pointerId)));
 // Desktop-Test: Mausrad = zoomen
 gesture.addEventListener('wheel', e => {
-  if (locked || !overlay.src) return;
   e.preventDefault();
+  if (locked || !overlay.src || !visible) { setZoom(zoom * Math.exp(-e.deltaY / 500)); return; }
   t.s = Math.min(20, Math.max(0.05, t.s * Math.exp(-e.deltaY / 500)));
   applyTransform();
 }, { passive: false });
@@ -192,7 +253,8 @@ $('shutter').onclick = () => {
   if (!vw || !vh) return;
   // object-fit: cover nachbilden -> sichtbaren Bereich aus dem Videoframe ausschneiden
   const W = video.clientWidth, H = video.clientHeight;
-  const k = Math.max(W / vw, H / vh);
+  // bei digitalem Zoom zusätzlich nur die vergrößerte Mitte nehmen
+  const k = Math.max(W / vw, H / vh) * (hwZoom ? 1 : zoom);
   const sw = Math.round(W / k), sh = Math.round(H / k);
   const sx = Math.round((vw - sw) / 2), sy = Math.round((vh - sh) / 2);
 
